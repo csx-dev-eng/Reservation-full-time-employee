@@ -1,0 +1,305 @@
+[
+  {
+    "id": "flow_main",
+    "type": "tab",
+    "label": "ITP WhatsApp Bot",
+    "disabled": false,
+    "info": "WhatsApp booking bot for ITP station"
+  },
+
+  {
+    "id": "webhook_get",
+    "type": "http in",
+    "z": "flow_main",
+    "name": "GET /wa-webhook (verify)",
+    "url": "/wa-webhook",
+    "method": "get",
+    "x": 170,
+    "y": 80,
+    "wires": [["verify_token"]]
+  },
+  {
+    "id": "verify_token",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Verify Token",
+    "func": "const verifyToken = global.get('WA_VERIFY_TOKEN');\nconst mode = msg.req.query['hub.mode'];\nconst token = msg.req.query['hub.verify_token'];\nconst challenge = msg.req.query['hub.challenge'];\n\nif (mode === 'subscribe' && token === verifyToken) {\n    msg.payload = parseInt(challenge);\n    msg.statusCode = 200;\n} else {\n    msg.payload = 'Forbidden';\n    msg.statusCode = 403;\n}\nreturn msg;",
+    "outputs": 1,
+    "x": 420,
+    "y": 80,
+    "wires": [["verify_response"]]
+  },
+  {
+    "id": "verify_response",
+    "type": "http response",
+    "z": "flow_main",
+    "name": "Respond",
+    "statusCode": "",
+    "x": 630,
+    "y": 80,
+    "wires": []
+  },
+
+  {
+    "id": "webhook_post",
+    "type": "http in",
+    "z": "flow_main",
+    "name": "POST /wa-webhook",
+    "url": "/wa-webhook",
+    "method": "post",
+    "x": 170,
+    "y": 180,
+    "wires": [["ack_200"]]
+  },
+  {
+    "id": "ack_200",
+    "type": "function",
+    "z": "flow_main",
+    "name": "ACK 200 + Extract",
+    "func": "// Immediately respond 200 to Meta\nnode.send([null, { payload: '', statusCode: 200, _msgid: msg._msgid }]);\n\n// Extract message data\nconst body = msg.payload;\nif (!body.entry || !body.entry[0]) return null;\n\nconst changes = body.entry[0].changes;\nif (!changes || !changes[0]) return null;\n\nconst value = changes[0].value;\nif (!value.messages || !value.messages[0]) return null;\n\nconst message = value.messages[0];\nconst phone = message.from;\n\nlet inputType = 'text';\nlet inputValue = '';\n\nif (message.type === 'interactive') {\n    if (message.interactive.type === 'list_reply') {\n        inputType = 'list_reply';\n        inputValue = message.interactive.list_reply.id;\n    } else if (message.interactive.type === 'button_reply') {\n        inputType = 'button_reply';\n        inputValue = message.interactive.button_reply.id;\n    }\n} else if (message.type === 'text') {\n    inputType = 'text';\n    inputValue = message.text.body;\n} else {\n    // status-only or unsupported type — ignore\n    return null;\n}\n\nmsg.phone = phone;\nmsg.inputType = inputType;\nmsg.inputValue = inputValue;\n\nreturn [msg, null];",
+    "outputs": 2,
+    "x": 420,
+    "y": 180,
+    "wires": [["state_router"], ["ack_response"]]
+  },
+  {
+    "id": "ack_response",
+    "type": "http response",
+    "z": "flow_main",
+    "name": "ACK Response",
+    "statusCode": "",
+    "x": 640,
+    "y": 240,
+    "wires": []
+  },
+
+  {
+    "id": "state_router",
+    "type": "function",
+    "z": "flow_main",
+    "name": "State Router",
+    "func": "const phone = msg.phone;\nconst input = msg.inputValue;\nconst inputType = msg.inputType;\n\n// Load state for this phone\nconst sessions = flow.get('sessions') || {};\nconst s = sessions[phone] || { state: 'IDLE' };\n\nmsg.session = s;\nmsg.sessions = sessions;\n\n// Route based on current state + input\nconst state = s.state;\n\n// Global: MENU_MAIN button always returns to main menu\nif (input === 'MENU_MAIN') {\n    s.state = 'IDLE';\n    sessions[phone] = s;\n    flow.set('sessions', sessions);\n    msg.session = s;\n    return [msg, null, null, null, null, null, null]; // -> send main menu\n}\n\nif (state === 'IDLE') {\n    // Any input in IDLE -> main menu\n    if (input === 'BOOK_START') {\n        s.state = 'PICK_DAY';\n        s.dayCursor = 0;\n        sessions[phone] = s;\n        flow.set('sessions', sessions);\n        msg.session = s;\n        return [null, msg, null, null, null, null, null]; // -> fetch days\n    }\n    if (input === 'DOCS') {\n        return [null, null, null, null, null, null, msg]; // -> info: docs\n    }\n    if (input === 'PRICE') {\n        return [null, null, null, null, null, null, msg]; // -> info: price\n    }\n    if (input === 'LOCATION') {\n        return [null, null, null, null, null, null, msg]; // -> info: location\n    }\n    // Unknown -> main menu\n    return [msg, null, null, null, null, null, null];\n}\n\nif (state === 'PICK_DAY') {\n    // DAY_YYYY-MM-DD or DAY_MORE_YYYY-MM-DD\n    if (input.startsWith('DAY_MORE_')) {\n        const cursor = input.replace('DAY_MORE_', '');\n        s.dayCursor = cursor;\n        sessions[phone] = s;\n        flow.set('sessions', sessions);\n        msg.session = s;\n        return [null, msg, null, null, null, null, null]; // -> fetch more days\n    }\n    if (input.startsWith('DAY_')) {\n        const date = input.replace('DAY_', '');\n        s.selectedDate = date;\n        s.state = 'PICK_SLOT';\n        s.slotCursor = 0;\n        sessions[phone] = s;\n        flow.set('sessions', sessions);\n        msg.session = s;\n        return [null, null, msg, null, null, null, null]; // -> fetch slots\n    }\n    // Unknown in PICK_DAY -> resend day list\n    return [null, msg, null, null, null, null, null];\n}\n\nif (state === 'PICK_SLOT') {\n    if (input.startsWith('SLOT_MORE_')) {\n        const cursor = input.replace('SLOT_MORE_' + s.selectedDate + '_', '');\n        s.slotCursor = cursor;\n        sessions[phone] = s;\n        flow.set('sessions', sessions);\n        msg.session = s;\n        return [null, null, msg, null, null, null, null]; // -> fetch more slots\n    }\n    if (input.startsWith('SLOT_')) {\n        // SLOT_YYYY-MM-DD_HH:MM\n        const parts = input.replace('SLOT_', '').split('_');\n        const date = parts[0];\n        const time = parts[1];\n        s.selectedSlotStart = time;\n        // Calculate end time (30 min later)\n        const [h, m] = time.split(':').map(Number);\n        const endM = m + 30;\n        const eh = h + Math.floor(endM / 60);\n        const em = endM % 60;\n        s.selectedSlotEnd = String(eh).padStart(2, '0') + ':' + String(em).padStart(2, '0');\n        s.state = 'PICK_VEHICLE';\n        sessions[phone] = s;\n        flow.set('sessions', sessions);\n        msg.session = s;\n        return [null, null, null, msg, null, null, null]; // -> vehicle menu\n    }\n    // Unknown -> resend slot list\n    return [null, null, msg, null, null, null, null];\n}\n\nif (state === 'PICK_VEHICLE') {\n    if (input.startsWith('VEH_')) {\n        s.vehicleType = input;\n        s.state = 'WAIT_PLATE';\n        sessions[phone] = s;\n        flow.set('sessions', sessions);\n        msg.session = s;\n        return [null, null, null, null, msg, null, null]; // -> ask plate\n    }\n    // Unknown -> resend vehicle menu\n    return [null, null, null, msg, null, null, null];\n}\n\nif (state === 'WAIT_PLATE') {\n    if (inputType === 'text' && input.length >= 4) {\n        s.plate_raw = input;\n        s.plate_normalized = input.toUpperCase().replace(/[^A-Z0-9]/g, '');\n        s.state = 'CONFIRM';\n        sessions[phone] = s;\n        flow.set('sessions', sessions);\n        msg.session = s;\n        return [null, null, null, null, null, msg, null]; // -> show recap\n    }\n    // Invalid plate -> ask again\n    return [null, null, null, null, msg, null, null];\n}\n\nif (state === 'CONFIRM') {\n    if (input === 'CONFIRM_BOOK') {\n        msg.session = s;\n        msg.action = 'book';\n        return [null, null, null, null, null, msg, null]; // -> do booking\n    }\n    if (input === 'EDIT_BOOK') {\n        // Restart booking\n        s.state = 'PICK_DAY';\n        s.dayCursor = 0;\n        sessions[phone] = s;\n        flow.set('sessions', sessions);\n        msg.session = s;\n        return [null, msg, null, null, null, null, null]; // -> fetch days\n    }\n    // Unknown -> resend recap\n    return [null, null, null, null, null, msg, null];\n}\n\n// Fallback -> main menu\nreturn [msg, null, null, null, null, null, null];",
+    "outputs": 7,
+    "outputLabels": ["Main Menu", "Pick Day", "Pick Slot", "Pick Vehicle", "Wait Plate", "Confirm/Book", "Info"],
+    "x": 700,
+    "y": 180,
+    "wires": [
+      ["send_main_menu"],
+      ["fetch_days"],
+      ["fetch_slots"],
+      ["send_vehicle_menu"],
+      ["send_plate_prompt"],
+      ["handle_confirm"],
+      ["handle_info"]
+    ]
+  },
+
+  {
+    "id": "send_main_menu",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Build Main Menu",
+    "func": "const WA_TOKEN = global.get('WA_TOKEN');\nconst WA_PHONE = global.get('WA_PHONE_NUMBER_ID');\n\nmsg.url = `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`;\nmsg.method = 'POST';\nmsg.headers = {\n    'Authorization': `Bearer ${WA_TOKEN}`,\n    'Content-Type': 'application/json'\n};\nmsg.payload = {\n    messaging_product: 'whatsapp',\n    to: msg.phone,\n    type: 'interactive',\n    interactive: {\n        type: 'list',\n        header: { type: 'text', text: 'ITP Programari' },\n        body: { text: 'Alege o optiune:' },\n        action: {\n            button: 'Meniu',\n            sections: [{\n                title: 'Optiuni',\n                rows: [\n                    { id: 'BOOK_START', title: 'Programare ITP', description: 'Programeaza inspectia tehnica' },\n                    { id: 'DOCS', title: 'Documente necesare', description: 'Lista documente pentru ITP' },\n                    { id: 'PRICE', title: 'Tarife', description: 'Vezi tarifele ITP' },\n                    { id: 'LOCATION', title: 'Locatie', description: 'Adresa si harta statiei' }\n                ]\n            }]\n        }\n    }\n};\nreturn msg;",
+    "outputs": 1,
+    "x": 970,
+    "y": 80,
+    "wires": [["wa_send"]]
+  },
+
+  {
+    "id": "fetch_days",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Prepare Days Request",
+    "func": "const BRIDGE = global.get('BRIDGE_URL');\nconst s = msg.session;\n\n// Determine from date\nlet from;\nif (s.dayCursor && typeof s.dayCursor === 'string' && s.dayCursor.match(/\\d{4}-\\d{2}-\\d{2}/)) {\n    // Cursor is a date — start from day after\n    const d = new Date(s.dayCursor + 'T00:00:00');\n    d.setDate(d.getDate() + 1);\n    from = d.toISOString().split('T')[0];\n} else {\n    from = new Date().toISOString().split('T')[0];\n}\n\nmsg.url = `${BRIDGE}/available-days?from=${from}&count=30`;\nmsg.method = 'GET';\nmsg.headers = { 'Content-Type': 'application/json' };\n\nreturn msg;",
+    "outputs": 1,
+    "x": 970,
+    "y": 160,
+    "wires": [["bridge_days_call"]]
+  },
+  {
+    "id": "bridge_days_call",
+    "type": "http request",
+    "z": "flow_main",
+    "name": "Bridge: available-days",
+    "method": "GET",
+    "ret": "obj",
+    "url": "",
+    "x": 1190,
+    "y": 160,
+    "wires": [["build_day_list"]]
+  },
+  {
+    "id": "build_day_list",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Build Day List Menu",
+    "func": "const WA_TOKEN = global.get('WA_TOKEN');\nconst WA_PHONE = global.get('WA_PHONE_NUMBER_ID');\nconst days = (msg.payload && msg.payload.days) || [];\n\nconst maxRows = 9;\nconst rows = [];\n\nfor (let i = 0; i < Math.min(days.length, maxRows); i++) {\n    rows.push({\n        id: `DAY_${days[i].date}`,\n        title: days[i].label,\n        description: `${days[i].freeCount} locuri libere`\n    });\n}\n\n// Add \"Mai mult\" if more days exist\nif (days.length > maxRows) {\n    const lastDate = days[maxRows - 1].date;\n    rows.push({\n        id: `DAY_MORE_${lastDate}`,\n        title: 'Mai mult',\n        description: 'Vezi mai multe zile'\n    });\n}\n\nif (rows.length === 0) {\n    // No days available\n    msg.url = `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`;\n    msg.method = 'POST';\n    msg.headers = {\n        'Authorization': `Bearer ${WA_TOKEN}`,\n        'Content-Type': 'application/json'\n    };\n    msg.payload = {\n        messaging_product: 'whatsapp',\n        to: msg.phone,\n        type: 'text',\n        text: { body: 'Nu sunt zile disponibile momentan. Incearca mai tarziu.' }\n    };\n    return msg;\n}\n\nmsg.url = `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`;\nmsg.method = 'POST';\nmsg.headers = {\n    'Authorization': `Bearer ${WA_TOKEN}`,\n    'Content-Type': 'application/json'\n};\nmsg.payload = {\n    messaging_product: 'whatsapp',\n    to: msg.phone,\n    type: 'interactive',\n    interactive: {\n        type: 'list',\n        header: { type: 'text', text: 'Alege ziua' },\n        body: { text: 'Selecteaza o zi disponibila:' },\n        action: {\n            button: 'Zile disponibile',\n            sections: [{\n                title: 'Zile',\n                rows: rows\n            }]\n        }\n    }\n};\nreturn msg;",
+    "outputs": 1,
+    "x": 1410,
+    "y": 160,
+    "wires": [["wa_send"]]
+  },
+
+  {
+    "id": "fetch_slots",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Prepare Slots Request",
+    "func": "const BRIDGE = global.get('BRIDGE_URL');\nconst s = msg.session;\nconst date = s.selectedDate;\n\nmsg.url = `${BRIDGE}/availability?date=${date}`;\nmsg.method = 'GET';\nmsg.headers = { 'Content-Type': 'application/json' };\n\nreturn msg;",
+    "outputs": 1,
+    "x": 970,
+    "y": 240,
+    "wires": [["bridge_slots_call"]]
+  },
+  {
+    "id": "bridge_slots_call",
+    "type": "http request",
+    "z": "flow_main",
+    "name": "Bridge: availability",
+    "method": "GET",
+    "ret": "obj",
+    "url": "",
+    "x": 1190,
+    "y": 240,
+    "wires": [["build_slot_list"]]
+  },
+  {
+    "id": "build_slot_list",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Build Slot List Menu",
+    "func": "const WA_TOKEN = global.get('WA_TOKEN');\nconst WA_PHONE = global.get('WA_PHONE_NUMBER_ID');\nconst s = msg.session;\nconst date = s.selectedDate;\nlet slots = (msg.payload && msg.payload.slots) || [];\n\n// If cursor, skip slots before cursor\nif (s.slotCursor && typeof s.slotCursor === 'string' && s.slotCursor.match(/\\d{2}:\\d{2}/)) {\n    const cursorIdx = slots.findIndex(sl => sl.start === s.slotCursor);\n    if (cursorIdx >= 0) {\n        slots = slots.slice(cursorIdx + 1);\n    }\n}\n\nconst maxRows = 9;\nconst rows = [];\n\nfor (let i = 0; i < Math.min(slots.length, maxRows); i++) {\n    rows.push({\n        id: `SLOT_${date}_${slots[i].start}`,\n        title: `${slots[i].start} \\u2013 ${slots[i].end}`,\n        description: 'Loc liber'\n    });\n}\n\nif (slots.length > maxRows) {\n    const lastSlot = slots[maxRows - 1].start;\n    rows.push({\n        id: `SLOT_MORE_${date}_${lastSlot}`,\n        title: 'Mai mult',\n        description: 'Vezi mai multe ore'\n    });\n}\n\nif (rows.length === 0) {\n    msg.url = `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`;\n    msg.method = 'POST';\n    msg.headers = {\n        'Authorization': `Bearer ${WA_TOKEN}`,\n        'Content-Type': 'application/json'\n    };\n    msg.payload = {\n        messaging_product: 'whatsapp',\n        to: msg.phone,\n        type: 'text',\n        text: { body: 'Nu mai sunt locuri libere in aceasta zi. Te rugam alege alta zi.' }\n    };\n    return msg;\n}\n\nmsg.url = `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`;\nmsg.method = 'POST';\nmsg.headers = {\n    'Authorization': `Bearer ${WA_TOKEN}`,\n    'Content-Type': 'application/json'\n};\nmsg.payload = {\n    messaging_product: 'whatsapp',\n    to: msg.phone,\n    type: 'interactive',\n    interactive: {\n        type: 'list',\n        header: { type: 'text', text: 'Alege ora' },\n        body: { text: `Ore disponibile pentru ${date}:` },\n        action: {\n            button: 'Ore disponibile',\n            sections: [{\n                title: 'Ore',\n                rows: rows\n            }]\n        }\n    }\n};\nreturn msg;",
+    "outputs": 1,
+    "x": 1410,
+    "y": 240,
+    "wires": [["wa_send"]]
+  },
+
+  {
+    "id": "send_vehicle_menu",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Build Vehicle Menu",
+    "func": "const WA_TOKEN = global.get('WA_TOKEN');\nconst WA_PHONE = global.get('WA_PHONE_NUMBER_ID');\n\nmsg.url = `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`;\nmsg.method = 'POST';\nmsg.headers = {\n    'Authorization': `Bearer ${WA_TOKEN}`,\n    'Content-Type': 'application/json'\n};\nmsg.payload = {\n    messaging_product: 'whatsapp',\n    to: msg.phone,\n    type: 'interactive',\n    interactive: {\n        type: 'list',\n        header: { type: 'text', text: 'Categoria vehiculului' },\n        body: { text: 'Selecteaza tipul vehiculului:' },\n        action: {\n            button: 'Tip vehicul',\n            sections: [{\n                title: 'Vehicule',\n                rows: [\n                    { id: 'VEH_AUTO', title: 'Auto', description: 'Autoturism standard' },\n                    { id: 'VEH_GPL', title: 'Auto + GPL', description: 'Autoturism cu instalatie GPL' },\n                    { id: 'VEH_UTIL', title: 'Utilitara', description: 'Vehicul utilitar' }\n                ]\n            }]\n        }\n    }\n};\nreturn msg;",
+    "outputs": 1,
+    "x": 970,
+    "y": 320,
+    "wires": [["wa_send"]]
+  },
+
+  {
+    "id": "send_plate_prompt",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Ask for Plate",
+    "func": "const WA_TOKEN = global.get('WA_TOKEN');\nconst WA_PHONE = global.get('WA_PHONE_NUMBER_ID');\n\nmsg.url = `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`;\nmsg.method = 'POST';\nmsg.headers = {\n    'Authorization': `Bearer ${WA_TOKEN}`,\n    'Content-Type': 'application/json'\n};\nmsg.payload = {\n    messaging_product: 'whatsapp',\n    to: msg.phone,\n    type: 'text',\n    text: {\n        body: 'Scrie numarul de inmatriculare (ex: AR24CSX).'\n    }\n};\nreturn msg;",
+    "outputs": 1,
+    "x": 970,
+    "y": 400,
+    "wires": [["wa_send"]]
+  },
+
+  {
+    "id": "handle_confirm",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Confirm / Book",
+    "func": "const s = msg.session;\n\nif (msg.action === 'book') {\n    // Proceed to booking via bridge\n    const BRIDGE = global.get('BRIDGE_URL');\n    msg.url = `${BRIDGE}/book`;\n    msg.method = 'POST';\n    msg.headers = { 'Content-Type': 'application/json' };\n    msg.payload = {\n        date: s.selectedDate,\n        startTime: s.selectedSlotStart,\n        endTime: s.selectedSlotEnd,\n        vehicleType: s.vehicleType,\n        plateRaw: s.plate_raw,\n        plateNormalized: s.plate_normalized,\n        phone: msg.phone\n    };\n    return [null, msg]; // -> bridge book call\n}\n\n// Show recap with confirm buttons\nconst WA_TOKEN = global.get('WA_TOKEN');\nconst WA_PHONE = global.get('WA_PHONE_NUMBER_ID');\n\nconst vehicleLabels = {\n    VEH_AUTO: 'Auto',\n    VEH_GPL: 'Auto + GPL',\n    VEH_UTIL: 'Utilitara'\n};\nconst prices = {\n    VEH_AUTO: 200,\n    VEH_GPL: 250,\n    VEH_UTIL: 300\n};\n\nconst label = vehicleLabels[s.vehicleType] || s.vehicleType;\nconst price = prices[s.vehicleType] || '—';\n\nconst recap = [\n    `📋 *Rezumat programare:*`,\n    '',\n    `📅 Zi: ${s.selectedDate}`,\n    `🕐 Ora: ${s.selectedSlotStart} – ${s.selectedSlotEnd}`,\n    `🚗 Categorie: ${label}`,\n    `🔢 Numar: ${s.plate_normalized}`,\n    `📞 Telefon: ${msg.phone}`,\n    `💰 Tarif: ${price} RON`,\n    '',\n    `📄 Documente necesare: CI/BI, talon, asigurare RCA valabila`,\n    '',\n    `Confirmi programarea?`\n].join('\\n');\n\nmsg.url = `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`;\nmsg.method = 'POST';\nmsg.headers = {\n    'Authorization': `Bearer ${WA_TOKEN}`,\n    'Content-Type': 'application/json'\n};\nmsg.payload = {\n    messaging_product: 'whatsapp',\n    to: msg.phone,\n    type: 'interactive',\n    interactive: {\n        type: 'button',\n        body: { text: recap },\n        action: {\n            buttons: [\n                { type: 'reply', reply: { id: 'CONFIRM_BOOK', title: 'Confirm' } },\n                { type: 'reply', reply: { id: 'EDIT_BOOK', title: 'Modifica' } },\n                { type: 'reply', reply: { id: 'MENU_MAIN', title: 'Meniu' } }\n            ]\n        }\n    }\n};\nreturn [msg, null];",
+    "outputs": 2,
+    "outputLabels": ["Recap", "Bridge Book"],
+    "x": 970,
+    "y": 480,
+    "wires": [["wa_send"], ["bridge_book_call"]]
+  },
+
+  {
+    "id": "bridge_book_call",
+    "type": "http request",
+    "z": "flow_main",
+    "name": "Bridge: book",
+    "method": "POST",
+    "ret": "obj",
+    "url": "",
+    "x": 1190,
+    "y": 520,
+    "wires": [["handle_book_response"]]
+  },
+  {
+    "id": "handle_book_response",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Handle Book Response",
+    "func": "const WA_TOKEN = global.get('WA_TOKEN');\nconst WA_PHONE = global.get('WA_PHONE_NUMBER_ID');\nconst STATION_LAT = global.get('STATION_LAT');\nconst STATION_LON = global.get('STATION_LON');\nconst STATION_NAME = global.get('STATION_NAME');\nconst STATION_ADDRESS = global.get('STATION_ADDRESS');\nconst phone = msg.phone;\nconst result = msg.payload;\n\n// Reset session\nconst sessions = flow.get('sessions') || {};\nconst s = sessions[phone] || {};\n\nif (result && result.success) {\n    // Booking succeeded — send confirmation + location\n    s.state = 'IDLE';\n    sessions[phone] = s;\n    flow.set('sessions', sessions);\n\n    const confirmText = [\n        `✅ *Programare confirmata!*`,\n        '',\n        `🆔 Booking: ${result.bookingId}`,\n        `📅 Data: ${s.selectedDate}`,\n        `🕐 Ora: ${s.selectedSlotStart} – ${s.selectedSlotEnd}`,\n        `🚗 ${result.vehicleLabel}`,\n        `🔢 ${s.plate_normalized}`,\n        `💰 ${result.price} RON`,\n        '',\n        `📄 Nu uita documentele: CI/BI, talon, RCA.`,\n        `Multumim! Te asteptam.`\n    ].join('\\n');\n\n    // Send confirmation text\n    const textMsg = {\n        url: `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`,\n        method: 'POST',\n        headers: {\n            'Authorization': `Bearer ${WA_TOKEN}`,\n            'Content-Type': 'application/json'\n        },\n        payload: {\n            messaging_product: 'whatsapp',\n            to: phone,\n            type: 'text',\n            text: { body: confirmText }\n        }\n    };\n\n    // Send location\n    const locMsg = {\n        url: `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`,\n        method: 'POST',\n        headers: {\n            'Authorization': `Bearer ${WA_TOKEN}`,\n            'Content-Type': 'application/json'\n        },\n        payload: {\n            messaging_product: 'whatsapp',\n            to: phone,\n            type: 'location',\n            location: {\n                latitude: STATION_LAT,\n                longitude: STATION_LON,\n                name: STATION_NAME,\n                address: STATION_ADDRESS\n            }\n        }\n    };\n\n    return [textMsg, locMsg];\n} else {\n    // Booking failed\n    const errorCode = (result && result.code) || '';\n    let errorText = 'A aparut o eroare. Te rugam incearca din nou.';\n    if (errorCode === 'SLOT_TAKEN') {\n        errorText = 'Ne pare rau, locul ales a fost ocupat intre timp. Te rugam alege alt interval.';\n        s.state = 'PICK_DAY';\n        s.dayCursor = 0;\n    } else {\n        s.state = 'IDLE';\n    }\n    sessions[phone] = s;\n    flow.set('sessions', sessions);\n\n    const errMsg = {\n        url: `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`,\n        method: 'POST',\n        headers: {\n            'Authorization': `Bearer ${WA_TOKEN}`,\n            'Content-Type': 'application/json'\n        },\n        payload: {\n            messaging_product: 'whatsapp',\n            to: phone,\n            type: 'text',\n            text: { body: errorText }\n        }\n    };\n    return [errMsg, null];\n}",
+    "outputs": 2,
+    "outputLabels": ["Confirmation/Error", "Location"],
+    "x": 1410,
+    "y": 520,
+    "wires": [["wa_send"], ["wa_send_loc"]]
+  },
+
+  {
+    "id": "wa_send_loc",
+    "type": "http request",
+    "z": "flow_main",
+    "name": "WA Send Location",
+    "method": "POST",
+    "ret": "obj",
+    "url": "",
+    "x": 1640,
+    "y": 560,
+    "wires": [["log_wa_response_loc"]]
+  },
+  {
+    "id": "log_wa_response_loc",
+    "type": "debug",
+    "z": "flow_main",
+    "name": "WA Location Response",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "complete": "payload",
+    "x": 1870,
+    "y": 560,
+    "wires": []
+  },
+
+  {
+    "id": "handle_info",
+    "type": "function",
+    "z": "flow_main",
+    "name": "Handle Info Requests",
+    "func": "const WA_TOKEN = global.get('WA_TOKEN');\nconst WA_PHONE = global.get('WA_PHONE_NUMBER_ID');\nconst STATION_LAT = global.get('STATION_LAT');\nconst STATION_LON = global.get('STATION_LON');\nconst STATION_NAME = global.get('STATION_NAME');\nconst STATION_ADDRESS = global.get('STATION_ADDRESS');\nconst input = msg.inputValue;\n\nlet body = '';\nlet sendLocation = false;\n\nif (input === 'DOCS') {\n    body = [\n        '📄 *Documente necesare pentru ITP:*',\n        '',\n        '1. Carte de identitate / Buletin (CI/BI)',\n        '2. Certificat de inmatriculare (talon)',\n        '3. Asigurare RCA valabila',\n        '',\n        'Pentru vehicule cu GPL: certificat GPL valabil.',\n        '',\n        'Scrie orice mesaj pentru a reveni la meniu.'\n    ].join('\\n');\n} else if (input === 'PRICE') {\n    body = [\n        '💰 *Tarife ITP:*',\n        '',\n        '🚗 Auto: 200 RON',\n        '🚗 Auto + GPL: 250 RON',\n        '🚐 Utilitara: 300 RON',\n        '',\n        'Scrie orice mesaj pentru a reveni la meniu.'\n    ].join('\\n');\n} else if (input === 'LOCATION') {\n    body = `📍 *${STATION_NAME}*\\n${STATION_ADDRESS}\\n\\nScrie orice mesaj pentru a reveni la meniu.`;\n    sendLocation = true;\n}\n\nconst textMsg = {\n    url: `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`,\n    method: 'POST',\n    headers: {\n        'Authorization': `Bearer ${WA_TOKEN}`,\n        'Content-Type': 'application/json'\n    },\n    payload: {\n        messaging_product: 'whatsapp',\n        to: msg.phone,\n        type: 'text',\n        text: { body: body }\n    }\n};\n\nif (sendLocation) {\n    const locMsg = {\n        url: `https://graph.facebook.com/v18.0/${WA_PHONE}/messages`,\n        method: 'POST',\n        headers: {\n            'Authorization': `Bearer ${WA_TOKEN}`,\n            'Content-Type': 'application/json'\n        },\n        payload: {\n            messaging_product: 'whatsapp',\n            to: msg.phone,\n            type: 'location',\n            location: {\n                latitude: STATION_LAT,\n                longitude: STATION_LON,\n                name: STATION_NAME,\n                address: STATION_ADDRESS\n            }\n        }\n    };\n    return [textMsg, locMsg];\n}\n\nreturn [textMsg, null];",
+    "outputs": 2,
+    "outputLabels": ["Text", "Location"],
+    "x": 970,
+    "y": 560,
+    "wires": [["wa_send"], ["wa_send_loc"]]
+  },
+
+  {
+    "id": "wa_send",
+    "type": "http request",
+    "z": "flow_main",
+    "name": "WA Send Message",
+    "method": "POST",
+    "ret": "obj",
+    "url": "",
+    "x": 1640,
+    "y": 320,
+    "wires": [["log_wa_response"]]
+  },
+  {
+    "id": "log_wa_response",
+    "type": "debug",
+    "z": "flow_main",
+    "name": "WA Send Response",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "complete": "payload",
+    "x": 1870,
+    "y": 320,
+    "wires": []
+  }
+]
