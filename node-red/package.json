@@ -1,0 +1,12 @@
+{
+  "name": "itp-node-red",
+  "version": "1.0.0",
+  "description": "Node-RED instance for ITP WhatsApp booking bot",
+  "scripts": {
+    "start": "node-red -s settings.js",
+    "dev": "node-red -s settings.js"
+  },
+  "dependencies": {
+    "node-red": "^3.1.0"
+  }
+}
